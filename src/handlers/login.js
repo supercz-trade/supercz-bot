@@ -11,6 +11,9 @@ bot.onText(/\/start (.+)/, async (msg, match) => {
   const token      = match[1];
   const telegramId = msg.from.id;
 
+  // skip kalau ini token tracking request
+  if (token.startsWith("token_0x")) return;
+
   try {
 
     // =========================
