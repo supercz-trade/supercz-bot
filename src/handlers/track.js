@@ -51,7 +51,7 @@ bot.onText(/\/start token_(0x[a-fA-F0-9]{40})/, async (msg, match) => {
       FROM token_holders
       WHERE LOWER(token_address) = $1 AND balance > 0
       ORDER BY balance DESC
-      LIMIT 20
+      LIMIT 10
     `, [tokenAddress]);
 
     // ── Fetch buy/sell volume breakdown ───────────────────────
@@ -161,7 +161,7 @@ bot.onText(/\/start token_(0x[a-fA-F0-9]{40})/, async (msg, match) => {
       devLine ? `👨‍💻  <b>Dev Wallet</b>        ${devLine}` : null,
       ``,
       `──────────────────`,
-      `🐋  <b>Top 20 Holders</b>`,
+      `🐋  <b>Top 10 Holders</b>`,
       holdersLines,
       `──────────────────`,
     ].filter(l => l !== null).join("\n");

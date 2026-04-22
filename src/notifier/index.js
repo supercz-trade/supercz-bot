@@ -1,8 +1,8 @@
 // src/notifier/index.js
 
-import WebSocket        from "ws";
-import { handleTokenUpdate } from "./handler.js";
-import { startTrending }     from "./trending.js";
+import WebSocket                from "ws";
+import { handleTokenUpdate, loadExistingSignals } from "./handler.js";
+import { startTrending }        from "./trending.js";
 
 let _ws = null;
 
@@ -38,6 +38,7 @@ function connect() {
 }
 
 export async function startNotifier() {
+  await loadExistingSignals();
   connect();
   startTrending();
 }

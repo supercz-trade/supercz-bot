@@ -136,10 +136,11 @@ export async function sendMomentumAlert(tokenAddress, data) {
   if (holders.length > 0) {
     const totalSupply = 1_000_000_000;
     holdersLine = holders.map((h, i) => {
-      const pct = ((Number(h.balance) / totalSupply) * 100).toFixed(1);
-      const addr = h.holder_address;
+      const pct   = ((Number(h.balance) / totalSupply) * 100).toFixed(1);
+      const addr  = h.holder_address;
       const short = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-      return `    ${i + 1}. <code>${short}</code>  ${pct}%`;
+      const url   = `https://bscscan.com/address/${addr}`;
+      return `    ${i + 1}. <a href="${url}">${short}</a>  ${pct}%`;
     }).join("\n");
   }
 
@@ -186,11 +187,13 @@ export async function sendMomentumAlert(tokenAddress, data) {
   const caption = lines.join("\n");
 
   try {
+    const trackUrl = `https://t.me/superczpro_bot?start=token_${tokenAddress}`;
     const sentMsg = await send(imageUrl, caption, [
-      [{ text: "Trade on SuperCZ  →", url: tokenUrl }],
+      [{ text: "🚀 Trade on SuperCZ", url: tokenUrl }],
       [
-        { text: "DexScreener", url: dexUrl },
-        { text: "BSCScan", url: bscUrl }
+        { text: "🔍 Track", url: trackUrl },
+        { text: "📊 DexScreener", url: dexUrl },
+        { text: "🔗 BSCScan", url: bscUrl }
       ]
     ]);
     if (sentMsg) sentMsg._imageUrl = imageUrl;
@@ -262,9 +265,13 @@ export async function sendMultiplierUpdate({ tokenAddress, data, entryMcap, curr
   ].join("\n");
 
   try {
+    const trackUrl = `https://t.me/superczpro_bot?start=token_${tokenAddress}`;
     const sentMsg = await send(img, caption, [
-      [{ text: "Trade on SuperCZ  →", url: tokenUrl }],
-      [{ text: "BSCScan", url: bscUrl }]
+      [{ text: "🚀 Trade on SuperCZ", url: tokenUrl }],
+      [
+        { text: "🔍 Track", url: trackUrl },
+        { text: "🔗 BSCScan", url: bscUrl }
+      ]
     ], {
       reply_parameters: { message_id: replyMsgId }
     });
