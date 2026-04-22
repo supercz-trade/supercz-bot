@@ -1,9 +1,8 @@
 // src/handlers/track.js
-// /start token_0x... — show detailed token info in private chat
 
 import { bot } from "../bot.js";
 import { db }  from "../db.js";
-import { escapeHTML, fmtUSD, fmtBNB, progressBar } from "../utils/format.js";
+import { escapeHTML, fmtUSD } from "../utils/format.js";
 import { entrySignals } from "../notifier/handler.js";
 
 const BASE_MULTIPLIER_LEVELS = [2, 5, 10, 25, 50, 100, 200, 500, 1000];
@@ -17,15 +16,16 @@ function getReachedMultiplier(addr) {
   return last * Math.pow(2, idx - BASE_MULTIPLIER_LEVELS.length + 1);
 }
 
-bot.onText(/\/start token_(0x[a-fA-F0-9]{40})/, async (msg, match) => {
-  const chatId       = msg.chat.id;
-  const tokenAddress = match[1].toLowerCase();
+// =========================
+// FETCH & SEND TOKEN INFO
+// =========================
+async function sendTokenInfo(chatId, tokenAddress) {
+  tokenAddress = tokenAddress.toLowerCase();
 
   try {
-    // ── Fetch token info ──────────────────────────────────────
     const { rows } = await db.query(`
       SELECT
-        lt.name, lt.symbol, lt.source_from, lt.image_url,
+        lt.name, lt.symbol, lt.image_url,
         lt.base_pair, lt.developer_address,
         ts.price_usdt, ts.marketcap, ts.volume_24h,
         ts.tx_count, ts.holder_count, ts.paperhand_pct,
@@ -43,130 +43,70 @@ bot.onText(/\/start token_(0x[a-fA-F0-9]{40})/, async (msg, match) => {
       return bot.sendMessage(chatId, "❌ Token not found.");
     }
 
-    const info = rows[0];
-
-    // ── Fetch top 20 holders ──────────────────────────────────
-    const { rows: holders } = await db.query(`
-      SELECT holder_address, balance
-      FROM token_holders
-      WHERE LOWER(token_address) = $1 AND balance > 0
-      ORDER BY balance DESC
-      LIMIT 10
-    `, [tokenAddress]);
-
-    // ── Fetch buy/sell volume breakdown ───────────────────────
-    const { rows: vol } = await db.query(`
-      SELECT
-        COALESCE(SUM(in_usdt_payable) FILTER (WHERE position='BUY'),  0) AS buy_vol,
-        COALESCE(SUM(in_usdt_payable) FILTER (WHERE position='SELL'), 0) AS sell_vol,
-        COUNT(*) FILTER (WHERE position='BUY')  AS buy_count,
-        COUNT(*) FILTER (WHERE position='SELL') AS sell_count
-      FROM token_transactions
-      WHERE LOWER(token_address) = $1
-        AND position IN ('BUY','SELL')
-    `, [tokenAddress]);
-
-    // ── Fetch dev wallet activity ─────────────────────────────
-    const devAddr = info.developer_address?.toLowerCase();
-    let devLine = "";
-    if (devAddr) {
-      const { rows: devTx } = await db.query(`
-        SELECT
-          COALESCE(SUM(amount_base_payable) FILTER (WHERE position='BUY'),  0) AS dev_buy,
-          COALESCE(SUM(amount_base_payable) FILTER (WHERE position='SELL'), 0) AS dev_sell
-        FROM token_transactions
-        WHERE LOWER(token_address) = $1
-          AND LOWER(address_message_sender) = $2
-          AND position IN ('BUY','SELL')
-      `, [tokenAddress, devAddr]);
-
-      if (devTx.length) {
-        const devBuy  = Number(devTx[0].dev_buy  || 0).toFixed(4);
-        const devSell = Number(devTx[0].dev_sell || 0).toFixed(4);
-        const bs      = info.base_symbol || info.base_pair || "BNB";
-        devLine = `Dev bought ${devBuy} ${bs} · sold ${devSell} ${bs}`;
-      }
-    }
-
-    // ── Build message ─────────────────────────────────────────
+    const info       = rows[0];
     const name       = escapeHTML(info.name   || "Unknown");
     const symbol     = escapeHTML(info.symbol || "???");
     const mcap       = fmtUSD(info.marketcap  || 0);
-    const vol24h     = fmtUSD(info.volume_24h || 0);
-    const holders_n  = info.holder_count || 0;
+    const vol        = fmtUSD(info.volume_24h || 0);
+    const price      = Number(info.price_usdt || 0).toFixed(8);
+    const holders    = info.holder_count || 0;
     const txCount    = info.tx_count     || 0;
     const paperhand  = Number(info.paperhand_pct || 0).toFixed(1);
     const mode       = info.mode || "bonding";
     const baseSymbol = info.base_symbol || info.base_pair || "BNB";
-    const buyVol     = fmtUSD(Number(vol[0]?.buy_vol  || 0));
-    const sellVol    = fmtUSD(Number(vol[0]?.sell_vol || 0));
-    const buyCount   = vol[0]?.buy_count  || 0;
-    const sellCount  = vol[0]?.sell_count || 0;
 
-    const tokenUrl  = `${process.env.FRONTEND_URL}/trade/${tokenAddress}`;
-    const bscUrl    = `https://bscscan.com/address/${tokenAddress}`;
-    const dexUrl    = `https://dexscreener.com/bsc/${tokenAddress}`;
-
-    // Multiplier
+    // Signal performance
     const xReached = getReachedMultiplier(tokenAddress);
     const entry    = entrySignals.get(tokenAddress);
-    const xLine    = xReached
-      ? `📈  <b>Signal Performance</b>   ${xReached}X  (entry: ${fmtUSD(entry?.entryMcap || 0)})`
-      : `📈  <b>Signal Performance</b>   Tracking...`;
+    const signalLine = xReached
+      ? `📈  <b>${xReached}X</b>  from entry  <i>(${fmtUSD(entry?.entryMcap || 0)} → ${mcap})</i>`
+      : entry
+        ? `📈  Signal active  —  entry at ${fmtUSD(entry?.entryMcap || 0)}`
+        : null;
 
-    // Liquidity
-    let liqLine = "";
+    // Liquidity line
+    let liqLine;
     if (mode === "dex") {
-      const liqBase = Number(info.base_liquidity || 0).toFixed(4);
-      const liqUSD  = fmtUSD(info.liquidity_usd || 0);
-      liqLine = `💧  <b>Liquidity</b>         ${liqBase} ${baseSymbol}  ≈  ${liqUSD}`;
+      const base = Number(info.base_liquidity || 0).toFixed(2);
+      const usd  = fmtUSD(info.liquidity_usd  || 0);
+      liqLine = `💧  ${base} ${baseSymbol}  ≈  ${usd}`;
     } else {
-      const progress = Number(info.progress || 0) * 100;
-      const bar      = progressBar(progress);
-      const bondBase = Number(info.bonding_base || 0).toFixed(2);
-      const target   = fmtUSD(info.target || 10000);
-      liqLine = `💧  <b>Bonding</b>           ${bar}  ${progress.toFixed(1)}%\n    ${bondBase} ${baseSymbol}  /  ${target}`;
+      const pct  = (Number(info.progress || 0) * 100).toFixed(1);
+      const base = Number(info.bonding_base || 0).toFixed(2);
+      liqLine = `💧  ${base} ${baseSymbol}  ·  ${pct}% bonding`;
     }
 
-    // Top 20 holders
-    const totalSupply  = 1_000_000_000;
-    const holdersLines = holders.map((h, i) => {
-      const pct   = ((Number(h.balance) / totalSupply) * 100).toFixed(1);
-      const addr  = h.holder_address;
-      const short = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-      const url   = `https://bscscan.com/address/${addr}`;
-      return `    ${(i + 1).toString().padStart(2)}. <a href="${url}">${short}</a>  ${pct}%`;
-    }).join("\n");
+    // Buy/sell ratio
+    const { rows: vol2 } = await db.query(`
+      SELECT
+        COALESCE(SUM(in_usdt_payable) FILTER (WHERE position='BUY'),  0) AS buy_vol,
+        COALESCE(SUM(in_usdt_payable) FILTER (WHERE position='SELL'), 0) AS sell_vol
+      FROM token_transactions
+      WHERE LOWER(token_address) = $1 AND position IN ('BUY','SELL')
+    `, [tokenAddress]);
+
+    const buyVol  = Number(vol2[0]?.buy_vol  || 0);
+    const sellVol = Number(vol2[0]?.sell_vol || 0);
+    const total   = buyVol + sellVol;
+    const buyPct  = total > 0 ? ((buyVol / total) * 100).toFixed(0) : 0;
+    const sellPct = total > 0 ? (100 - buyPct) : 0;
+
+    const tokenUrl = `${process.env.FRONTEND_URL}/trade/${tokenAddress}`;
+    const bscUrl   = `https://bscscan.com/address/${tokenAddress}`;
+    const dexUrl   = `https://dexscreener.com/bsc/${tokenAddress}`;
 
     const lines = [
-      `🔍  <b>Token Details</b>`,
-      ``,
       `<b>${name}</b>  <code>$${symbol}</code>`,
       `<code>${tokenAddress}</code>`,
       ``,
-      `──────────────────`,
-      xLine,
-      ``,
-      `💹  <b>Market Cap</b>       ${mcap}`,
-      `📊  <b>Volume 24h</b>       ${vol24h}`,
+      `💵  <b>${mcap}</b>  ·  $${price}`,
       liqLine,
       ``,
-      `👥  <b>Holders</b>          ${holders_n}`,
-      `🔄  <b>Transactions</b>     ${txCount}`,
-      `🤝  <b>Paperhand</b>        ${paperhand}%`,
-      ``,
-      `──────────────────`,
-      `📥  <b>Buy Volume</b>        ${buyVol}  (${buyCount} tx)`,
-      `📤  <b>Sell Volume</b>       ${sellVol}  (${sellCount} tx)`,
-      devLine ? `👨‍💻  <b>Dev Wallet</b>        ${devLine}` : null,
-      ``,
-      `──────────────────`,
-      `🐋  <b>Top 10 Holders</b>`,
-      holdersLines,
-      `──────────────────`,
-    ].filter(l => l !== null).join("\n");
+      `📊  Vol  ${vol}  ·  ${txCount} tx  ·  ${holders} holders`,
+      `⚖️  Buy ${buyPct}%  /  Sell ${sellPct}%  ·  PH ${paperhand}%`,
+      signalLine,
+    ].filter(Boolean).join("\n");
 
-    const imageUrl = info.image_url || null;
     const opts = {
       parse_mode              : "HTML",
       disable_web_page_preview: true,
@@ -181,6 +121,7 @@ bot.onText(/\/start token_(0x[a-fA-F0-9]{40})/, async (msg, match) => {
       }
     };
 
+    const imageUrl = info.image_url || null;
     if (imageUrl) {
       await bot.sendPhoto(chatId, imageUrl, { caption: lines, ...opts })
         .catch(() => bot.sendMessage(chatId, lines, opts));
@@ -192,4 +133,28 @@ bot.onText(/\/start token_(0x[a-fA-F0-9]{40})/, async (msg, match) => {
     console.error("[TRACK] error:", err.message);
     bot.sendMessage(chatId, "❌ Failed to fetch token info. Please try again.");
   }
+}
+
+// =========================
+// /start token_0x... (from channel button)
+// =========================
+bot.onText(/\/start token_(0x[a-fA-F0-9]{40})/, async (msg, match) => {
+  await sendTokenInfo(msg.chat.id, match[1]);
+});
+
+// =========================
+// /track <address>
+// =========================
+bot.onText(/\/track(?:\s+(0x[a-fA-F0-9]{40}))?/, async (msg, match) => {
+  const chatId  = msg.chat.id;
+  const address = match?.[1];
+
+  if (!address) {
+    return bot.sendMessage(chatId,
+      "Usage: <code>/track 0x1234...abcd</code>",
+      { parse_mode: "HTML" }
+    );
+  }
+
+  await sendTokenInfo(chatId, address);
 });
