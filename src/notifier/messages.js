@@ -12,25 +12,31 @@ const CHANNEL_ID = process.env.NOTIFY_CHANNEL_ID;
 function launchpadLink(source, tokenAddress) {
   const addr = tokenAddress.toLowerCase();
   if (source === "four_meme")
-    return `<a href="https://four.meme/en/token/${addr}">${source === "four_meme" ? "Four.meme" : source}</a>`;
+    return `<a href="https://four.meme/en/token/${addr}">Four.meme</a>`;
   if (source === "flap")
     return `<a href="https://flap.sh/bnb/${addr}">Flap.sh</a>`;
   return escapeHTML(source || "unknown");
 }
 
 // =========================
-// FETCH TOKEN INFO
+// FETCH TOKEN INFO (lengkap)
 // =========================
 async function getTokenInfo(tokenAddress) {
   try {
     const { rows } = await db.query(`
       SELECT
         lt.name, lt.symbol, lt.source_from, lt.image_url,
+        lt.base_pair,
         ts.price_usdt, ts.marketcap, ts.volume_24h,
-        ts.tx_count, ts.holder_count
+        ts.tx_count, ts.holder_count, ts.paperhand_pct,
+        tls.progress, tls.target, tls.mode,
+        tls.bonding_base, tls.base_symbol,
+        tls.base_liquidity, tls.liquidity_usd
       FROM launch_tokens lt
       LEFT JOIN token_stats ts
         ON LOWER(ts.token_address) = LOWER(lt.token_address)
+      LEFT JOIN token_liquidity_state tls
+        ON LOWER(tls.token_address) = LOWER(lt.token_address)
       WHERE LOWER(lt.token_address) = LOWER($1)
       LIMIT 1
     `, [tokenAddress]);
@@ -42,13 +48,30 @@ async function getTokenInfo(tokenAddress) {
 }
 
 // =========================
+// FETCH TOP HOLDERS
+// =========================
+async function getTopHolders(tokenAddress) {
+  try {
+    const { rows } = await db.query(`
+      SELECT holder_address, balance
+      FROM token_holders
+      WHERE LOWER(token_address) = LOWER($1)
+        AND balance > 0
+      ORDER BY balance DESC
+      LIMIT 5
+    `, [tokenAddress]);
+    return rows;
+  } catch { return []; }
+}
+
+// =========================
 // SEND HELPER
 // =========================
 async function send(imageUrl, caption, keyboard, extraOpts = {}) {
   const opts = {
-    parse_mode             : "HTML",
+    parse_mode              : "HTML",
     disable_web_page_preview: true,
-    reply_markup           : { inline_keyboard: keyboard },
+    reply_markup            : { inline_keyboard: keyboard },
     ...extraOpts,
   };
 
@@ -67,106 +90,106 @@ async function send(imageUrl, caption, keyboard, extraOpts = {}) {
 // EMOJI MONEY SCALER
 // =========================
 function moneyEmoji(multiplier) {
-  return "💸".repeat(Math.min(multiplier * 2, 100));
-}
-
-// =========================
-// MIGRATED ALERT
-// =========================
-export async function sendMigratedAlert(tokenAddress, data) {
-  const info = await getTokenInfo(tokenAddress);
-
-  const name       = escapeHTML(info?.name        || "Unknown");
-  const symbol     = escapeHTML(info?.symbol      || "???");
-  const source = launchpadLink(info?.source_from || "", tokenAddress);
-  const mcap       = fmtUSD(info?.marketcap       || data.marketcap || 0);
-  const vol        = fmtUSD(info?.volume_24h      || data.volume24h || 0);
-  const holders    = info?.holder_count           || 0;
-  const liqUSD     = fmtUSD(data.liquidity?.usd   || 0);
-  const liqBase    = fmtBNB(data.liquidity?.base  || 0);
-  const baseSymbol = data.baseSymbol              || "BNB";
-  const platform   = launchpadLink(info?.source_from || data.platform || "", tokenAddress);
-  const imageUrl   = info?.image_url              || null;
-
-  const tokenUrl = `${process.env.FRONTEND_URL}/trade/${tokenAddress}`;
-  const bscUrl   = `https://bscscan.com/address/${tokenAddress}`;
-  const dexUrl   = `https://dexscreener.com/bsc/${tokenAddress}`;
-
-  const caption = [
-    `🚀  <b>Token Migrated to DEX</b>`,
-    ``,
-    `<b>${name}</b>  <code>$${symbol}</code>`,
-    `<code>${tokenAddress}</code>`,
-    ``,
-    `──────────────────`,
-    `💧  <b>Liquidity</b>`,
-    `    ${liqBase.replace("BNB", baseSymbol)}  ≈  ${liqUSD}`,
-    ``,
-    `💹  <b>Market Cap</b>     ${mcap}`,
-    `📊  <b>Volume 24h</b>     ${vol}`,
-    `👥  <b>Holders</b>        ${holders}`,
-    ``,
-    `🏭  <b>From</b>           ${source}`,
-    `🔀  <b>DEX</b>            ${platform}`,
-    `──────────────────`,
-    `<i>Now trading on decentralized exchange. DYOR.</i>`,
-  ].join("\n");
-
-  await send(imageUrl, caption, [
-    [{ text: "Trade on SuperCZ  →", url: tokenUrl }],
-    [
-      { text: "DexScreener", url: dexUrl },
-      { text: "BSCScan", url: bscUrl }
-    ]
-  ]).catch(err => console.error("[NOTIFIER] sendMigratedAlert error:", err.message));
-
-  console.log(`[NOTIFIER] MIGRATED sent: ${symbol}`);
+  if (multiplier >= 100) return "💎🚀🔥";
+  if (multiplier >= 50)  return "💎🚀";
+  if (multiplier >= 10)  return "🚀🔥";
+  return "📈💸";
 }
 
 // =========================
 // MOMENTUM ALERT — Entry Signal
 // =========================
 export async function sendMomentumAlert(tokenAddress, data) {
-  const info = await getTokenInfo(tokenAddress);
+  const info    = await getTokenInfo(tokenAddress);
+  const holders = await getTopHolders(tokenAddress);
 
-  const name     = escapeHTML(info?.name        || "Unknown");
-  const symbol   = escapeHTML(info?.symbol      || "???");
-  const source = launchpadLink(info?.source_from || "", tokenAddress);
-  const mcap     = fmtUSD(info?.marketcap       || data.marketcap || 0);
-  const vol      = fmtUSD(info?.volume_24h      || data.volume24h || 0);
-  const holders  = info?.holder_count           || 0;
-  const txCount  = info?.tx_count               || data.txCount   || 0;
-  const progress = Number(data.progress         || 0);
-  const bar      = progressBar(progress);
-  const imageUrl = info?.image_url              || null;
+  const name        = escapeHTML(info?.name        || "Unknown");
+  const symbol      = escapeHTML(info?.symbol      || "???");
+  const source      = launchpadLink(info?.source_from || "", tokenAddress);
+  const mcap        = fmtUSD(info?.marketcap       || data.marketcap || 0);
+  const vol         = fmtUSD(info?.volume_24h      || data.volume24h || 0);
+  const holderCount = info?.holder_count           || data.holderCount || 0;
+  const txCount     = info?.tx_count               || data.txCount    || 0;
+  const paperhand   = Number(info?.paperhand_pct   || data.paperHandPct || 0).toFixed(1);
+  const mode        = info?.mode                   || data.mode || "bonding";
+  const imageUrl    = info?.image_url              || null;
+  const baseSymbol  = info?.base_symbol            || info?.base_pair || data.baseSymbol || "BNB";
+
+  // Progress (bonding)
+  const progress    = Number(info?.progress || data.progress || 0) * 100;
+  const bar         = mode !== "dex" ? progressBar(progress) : null;
+
+  // Liquidity
+  let liqLine = "";
+  if (mode === "dex") {
+    const liqBase = fmtBNB(info?.base_liquidity || data.liquidity?.base || 0);
+    const liqUSD  = fmtUSD(info?.liquidity_usd  || data.liquidity?.usd  || 0);
+    liqLine = `💧  <b>Liquidity</b>       ${liqBase.replace("BNB", baseSymbol)}  ≈  ${liqUSD}`;
+  } else {
+    const bondingBase = Number(info?.bonding_base || data.bondingLiquidity?.base || 0).toFixed(2);
+    const target      = fmtUSD(info?.target || data.targetUSD || 10000);
+    liqLine = `💧  <b>Bonding</b>         ${bondingBase} ${baseSymbol}  /  ${target}`;
+  }
+
+  // Top 5 holders
+  let holdersLine = "";
+  if (holders.length > 0) {
+    const totalSupply = 1_000_000_000;
+    holdersLine = holders.map((h, i) => {
+      const pct = ((Number(h.balance) / totalSupply) * 100).toFixed(1);
+      const addr = h.holder_address;
+      const short = `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+      return `    ${i + 1}. <code>${short}</code>  ${pct}%`;
+    }).join("\n");
+  }
 
   const tokenUrl = `${process.env.FRONTEND_URL}/trade/${tokenAddress}`;
   const bscUrl   = `https://bscscan.com/address/${tokenAddress}`;
+  const dexUrl   = `https://dexscreener.com/bsc/${tokenAddress}`;
 
-  const caption = [
+  const lines = [
     `⚡️  <b>Entry Signal</b>`,
     ``,
     `<b>${name}</b>  <code>$${symbol}</code>`,
     `<code>${tokenAddress}</code>`,
     ``,
     `──────────────────`,
-    `📈  <b>Bonding Progress</b>`,
-    `${bar}  <b>${progress.toFixed(1)}%</b>`,
-    ``,
+  ];
+
+  if (bar) {
+    lines.push(`📈  <b>Bonding Progress</b>`);
+    lines.push(`${bar}  <b>${progress.toFixed(1)}%</b>`);
+    lines.push(``);
+  }
+
+  lines.push(
     `💹  <b>Market Cap</b>     ${mcap}`,
     `📊  <b>Volume 24h</b>     ${vol}`,
-    `👥  <b>Holders</b>        ${holders}`,
+    liqLine,
+    ``,
+    `👥  <b>Holders</b>        ${holderCount}`,
     `🔄  <b>Transactions</b>   ${txCount}`,
+    `🤝  <b>Paperhand</b>      ${paperhand}%`,
     ``,
     `🏭  <b>Launchpad</b>      ${source}`,
-    `──────────────────`,
-    `<i>High activity detected in the last 60 seconds.</i>`,
-  ].join("\n");
+  );
+
+  if (holdersLine) {
+    lines.push(``);
+    lines.push(`🐋  <b>Top 5 Holders</b>`);
+    lines.push(holdersLine);
+  }
+
+  lines.push(`──────────────────`);
+  lines.push(`<i>High activity detected in the last 60 seconds.</i>`);
+
+  const caption = lines.join("\n");
 
   try {
     const sentMsg = await send(imageUrl, caption, [
+      [{ text: "Trade on SuperCZ  →", url: tokenUrl }],
       [
-        { text: "Trade on SuperCZ  →", url: tokenUrl },
+        { text: "DexScreener", url: dexUrl },
         { text: "BSCScan", url: bscUrl }
       ]
     ]);
@@ -180,28 +203,45 @@ export async function sendMomentumAlert(tokenAddress, data) {
 }
 
 // =========================
-// MULTIPLIER UPDATE — Reply ke Entry Signal
+// MULTIPLIER UPDATE — Reply ke Entry Signal (tanpa batas)
 // =========================
 export async function sendMultiplierUpdate({ tokenAddress, data, entryMcap, currentMcap, multiplier, replyMsgId, imageUrl }) {
   const info = await getTokenInfo(tokenAddress);
 
-  const name    = escapeHTML(info?.name   || "Unknown");
-  const symbol  = escapeHTML(info?.symbol || "???");
-  const holders = info?.holder_count      || 0;
-  const vol     = fmtUSD(info?.volume_24h || data.volume24h || 0);
-  const img     = imageUrl || info?.image_url || null;
+  const name        = escapeHTML(info?.name        || "Unknown");
+  const symbol      = escapeHTML(info?.symbol      || "???");
+  const holderCount = info?.holder_count           || 0;
+  const txCount     = info?.tx_count               || data.txCount || 0;
+  const vol         = fmtUSD(info?.volume_24h      || data.volume24h || 0);
+  const paperhand   = Number(info?.paperhand_pct   || 0).toFixed(1);
+  const img         = imageUrl || info?.image_url  || null;
+  const mode        = info?.mode                   || data.mode || "bonding";
+  const baseSymbol  = info?.base_symbol            || info?.base_pair || "BNB";
 
   const entryFmt   = fmtUSD(entryMcap);
   const currentFmt = fmtUSD(currentMcap);
   const tokenUrl   = `${process.env.FRONTEND_URL}/trade/${tokenAddress}`;
   const bscUrl     = `https://bscscan.com/address/${tokenAddress}`;
 
-  const badge = multiplier >= 50 ? `🔥 ${multiplier}X`
-              : multiplier >= 10 ? `🚀 ${multiplier}X`
-              : `📈 ${multiplier}X`;
-
   const channelUsername = (process.env.NOTIFY_CHANNEL_ID || "").replace("@", "");
   const entrySignalUrl  = `https://t.me/${channelUsername}/${replyMsgId}`;
+
+  // Liquidity
+  let liqLine = "";
+  if (mode === "dex") {
+    const liqBase = fmtBNB(info?.base_liquidity || data.liquidity?.base || 0);
+    const liqUSD  = fmtUSD(info?.liquidity_usd  || data.liquidity?.usd  || 0);
+    liqLine = `💧  <b>Liquidity</b>       ${liqBase.replace("BNB", baseSymbol)}  ≈  ${liqUSD}`;
+  } else {
+    const bondingBase = Number(info?.bonding_base || 0).toFixed(2);
+    const target      = fmtUSD(info?.target || 10000);
+    liqLine = `💧  <b>Bonding</b>         ${bondingBase} ${baseSymbol}  /  ${target}`;
+  }
+
+  const badge = multiplier >= 100 ? `💎 ${multiplier}X`
+              : multiplier >= 50  ? `🔥 ${multiplier}X`
+              : multiplier >= 10  ? `🚀 ${multiplier}X`
+              : `📈 ${multiplier}X`;
 
   const caption = [
     `${badge}  <b>${name}</b>  <code>$${symbol}</code>`,
@@ -212,7 +252,10 @@ export async function sendMultiplierUpdate({ tokenAddress, data, entryMcap, curr
     `    ${entryFmt}  →  <b>${currentFmt}</b>`,
     ``,
     `📊  <b>Volume 24h</b>     ${vol}`,
-    `👥  <b>Holders</b>        ${holders}`,
+    liqLine,
+    `👥  <b>Holders</b>        ${holderCount}`,
+    `🔄  <b>Transactions</b>   ${txCount}`,
+    `🤝  <b>Paperhand</b>      ${paperhand}%`,
     `──────────────────`,
     ``,
     moneyEmoji(multiplier),
@@ -220,10 +263,8 @@ export async function sendMultiplierUpdate({ tokenAddress, data, entryMcap, curr
 
   try {
     const sentMsg = await send(img, caption, [
-      [
-        { text: "Trade on SuperCZ  →", url: tokenUrl },
-        { text: "BSCScan", url: bscUrl }
-      ]
+      [{ text: "Trade on SuperCZ  →", url: tokenUrl }],
+      [{ text: "BSCScan", url: bscUrl }]
     ], {
       reply_parameters: { message_id: replyMsgId }
     });
@@ -233,54 +274,4 @@ export async function sendMultiplierUpdate({ tokenAddress, data, entryMcap, curr
     console.error("[NOTIFIER] sendMultiplierUpdate error:", err.message);
     return null;
   }
-}
-
-// =========================
-// MIGRATING ALERT (90%+)
-// =========================
-export async function sendMigratingAlert(tokenAddress, data) {
-  const info = await getTokenInfo(tokenAddress);
-
-  const name     = escapeHTML(info?.name        || "Unknown");
-  const symbol   = escapeHTML(info?.symbol      || "???");
-  const source = launchpadLink(info?.source_from || "", tokenAddress);
-  const mcap     = fmtUSD(info?.marketcap       || data.marketcap || 0);
-  const vol      = fmtUSD(info?.volume_24h      || data.volume24h || 0);
-  const holders  = info?.holder_count           || 0;
-  const txCount  = info?.tx_count               || 0;
-  const progress = Number(data.progress         || 0);
-  const bar      = progressBar(progress);
-  const imageUrl = info?.image_url              || null;
-
-  const tokenUrl = `${process.env.FRONTEND_URL}/trade/${tokenAddress}`;
-  const bscUrl   = `https://bscscan.com/address/${tokenAddress}`;
-
-  const caption = [
-    `⚡️  <b>Token About to Migrate</b>`,
-    ``,
-    `<b>${name}</b>  <code>$${symbol}</code>`,
-    `<code>${tokenAddress}</code>`,
-    ``,
-    `──────────────────`,
-    `📈  <b>Bonding Progress</b>`,
-    `${bar}  <b>${progress.toFixed(1)}%</b>`,
-    ``,
-    `💹  <b>Market Cap</b>     ${mcap}`,
-    `📊  <b>Volume 24h</b>     ${vol}`,
-    `👥  <b>Holders</b>        ${holders}`,
-    `🔄  <b>Transactions</b>   ${txCount}`,
-    ``,
-    `🏭  <b>Launchpad</b>      ${source}`,
-    `──────────────────`,
-    `<i>Migration imminent — approaching graduation threshold.</i>`,
-  ].join("\n");
-
-  await send(imageUrl, caption, [
-    [
-      { text: "Trade on SuperCZ  →", url: tokenUrl },
-      { text: "BSCScan", url: bscUrl }
-    ]
-  ]).catch(err => console.error("[NOTIFIER] sendMigratingAlert error:", err.message));
-
-  console.log(`[NOTIFIER] MIGRATING sent: ${symbol}`);
 }
