@@ -9,6 +9,7 @@ import { db } from "./src/db.js";
 
 import "./src/handlers/start.js";
 import "./src/handlers/login.js";
+import "./src/handlers/track.js";
 
 import { startNotifier } from "./src/notifier/index.js";
 

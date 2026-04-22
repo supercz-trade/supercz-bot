@@ -29,6 +29,7 @@ const BASE_MULTIPLIER_LEVELS = [2, 5, 10, 25, 50, 100, 200, 500, 1000];
 
 const momentumState = new Map();
 export const entrySignals = new Map();
+const filterLogCooldown = new Map(); // suppress repeat filter logs
 
 // =========================
 // GET NEXT MULTIPLIER LEVEL
@@ -218,7 +219,11 @@ export async function handleTokenUpdate(data) {
 
   const { pass, reason } = passesQualityFilter(data);
   if (!pass) {
-    console.log(`[NOTIFIER] FILTERED: ${addr} — ${reason}`);
+    const lastLog = filterLogCooldown.get(addr) || 0;
+    if (Date.now() - lastLog > 5 * 60_000) {
+      console.log(`[NOTIFIER] FILTERED: ${addr} — ${reason}`);
+      filterLogCooldown.set(addr, Date.now());
+    }
     return;
   }
 
